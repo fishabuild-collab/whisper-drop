@@ -2,6 +2,16 @@
 
 from pathlib import Path
 import time
+
+# Ensure a bundled ffmpeg is on PATH before whisper loads (teammates may not
+# have Homebrew's ffmpeg). static-ffmpeg ships a static binary per platform and
+# is installed by the bootstrap launcher. No-op if unavailable.
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 import whisper
 
 SUPPORTED_EXTENSIONS = {

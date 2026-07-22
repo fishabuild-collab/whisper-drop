@@ -1,0 +1,7 @@
+.venv/
+bin/
+.deps_installed
+output/
+__pycache__/
+*.pyc
+.DS_Store
