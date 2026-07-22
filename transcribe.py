@@ -106,7 +106,11 @@ def run_batch(
         t0 = time.time()
         try:
             segments = transcribe_file(model, media_path, language)
-            srt_path.write_text(segments_to_srt(segments), encoding="utf-8")
+            srt_content = segments_to_srt(segments)
+            srt_path.write_text(srt_content, encoding="utf-8")
+            # Also write a .txt copy with the same SRT-formatted content.
+            txt_path = output_folder / (media_path.stem + ".txt")
+            txt_path.write_text(srt_content, encoding="utf-8")
             elapsed = time.time() - t0
             succeeded += 1
             progress_callback("done", {"index": i, "total": total, "file": media_path, "elapsed": elapsed})
