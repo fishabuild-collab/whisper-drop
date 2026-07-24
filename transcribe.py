@@ -1,7 +1,10 @@
 """Whisper transcription logic — imported by app.py."""
 
-from pathlib import Path
+import io
+import re
+import subprocess
 import time
+from pathlib import Path
 
 # Ensure a bundled ffmpeg is on PATH before whisper loads (teammates may not
 # have Homebrew's ffmpeg). static-ffmpeg ships a static binary per platform and
@@ -18,6 +21,29 @@ SUPPORTED_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv",
     ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma", ".opus",
 }
+
+# Common languages Whisper supports well, shown in the dropdown.
+# "auto" lets Whisper detect the language from the audio itself.
+LANGUAGES = {
+    "auto": "Auto-detect",
+    "zh": "Chinese (incl. Cantonese)",
+    "en": "English",
+    "yue": "Cantonese (yue)",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "vi": "Vietnamese",
+    "th": "Thai",
+    "id": "Indonesian",
+    "ms": "Malay",
+    "hi": "Hindi",
+    "pt": "Portuguese",
+}
+DEFAULT_LANGUAGE = "zh"
+
+_TS_RE = re.compile(r"\[([\d:.]+)\s*-->\s*([\d:.]+)\]")
 
 
 def find_media_files(paths: list[Path]) -> list[Path]:
@@ -62,11 +88,84 @@ def load_model(model_name: str):
     return whisper.load_model(model_name)
 
 
-def transcribe_file(model, media_path: Path, language: str = "zh") -> list[dict]:
+def get_duration(media_path: Path) -> float | None:
+    """Media duration in seconds via ffprobe, or None if it can't be read."""
     try:
-        result = model.transcribe(str(media_path), language=language, fp16=False, verbose=False)
-    except (ValueError, IndexError):
-        result = model.transcribe(str(media_path), fp16=False, verbose=False)
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(media_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+
+def _parse_timestamp(ts: str) -> float:
+    parts = [float(p) for p in ts.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0.0)
+    h, m, s = parts
+    return h * 3600 + m * 60 + s
+
+
+class _ProgressCapture(io.TextIOBase):
+    """Intercepts Whisper's verbose stdout lines to report decode progress."""
+
+    def __init__(self, duration: float | None, on_fraction):
+        self._duration = duration
+        self._on_fraction = on_fraction
+        self._buffer = ""
+
+    def write(self, s):
+        self._buffer += s
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            m = _TS_RE.search(line)
+            if m and self._duration:
+                end = _parse_timestamp(m.group(2))
+                self._on_fraction(min(end / self._duration, 1.0))
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+def transcribe_file(
+    model,
+    media_path: Path,
+    language: str = DEFAULT_LANGUAGE,
+    task: str = "transcribe",
+    on_fraction=None,
+) -> list[dict]:
+    lang_arg = None if language == "auto" else language
+    duration = get_duration(media_path) if on_fraction else None
+
+    kwargs = dict(language=lang_arg, task=task, fp16=False, verbose=True)
+
+    def _run():
+        return model.transcribe(str(media_path), **kwargs)
+
+    if on_fraction and duration:
+        capture = _ProgressCapture(duration, on_fraction)
+        import contextlib
+        try:
+            with contextlib.redirect_stdout(capture):
+                result = _run()
+        except (ValueError, IndexError):
+            kwargs.pop("language", None)
+            with contextlib.redirect_stdout(capture):
+                result = _run()
+        on_fraction(1.0)
+    else:
+        import contextlib
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                result = _run()
+            except (ValueError, IndexError):
+                kwargs.pop("language", None)
+                result = _run()
+
     return result["segments"]
 
 
@@ -77,15 +176,17 @@ def run_batch(
     language: str,
     progress_callback,
     stop_flag,
+    task: str = "transcribe",
 ):
     """
     Transcribe a list of files.
     progress_callback(event, data) receives:
-      ("skip",   {"index": i, "total": n, "file": Path})
-      ("start",  {"index": i, "total": n, "file": Path})
-      ("done",   {"index": i, "total": n, "file": Path, "elapsed": float})
-      ("error",  {"index": i, "total": n, "file": Path, "error": str})
-      ("finish", {"succeeded": int, "failed": int, "skipped": int})
+      ("skip",     {"index": i, "total": n, "file": Path})
+      ("start",    {"index": i, "total": n, "file": Path})
+      ("progress", {"index": i, "total": n, "file": Path, "fraction": float})
+      ("done",     {"index": i, "total": n, "file": Path, "elapsed": float})
+      ("error",    {"index": i, "total": n, "file": Path, "error": str})
+      ("finish",   {"succeeded": int, "failed": int, "skipped": int})
     """
     output_folder.mkdir(parents=True, exist_ok=True)
     total = len(files)
@@ -105,7 +206,10 @@ def run_batch(
         progress_callback("start", {"index": i, "total": total, "file": media_path})
         t0 = time.time()
         try:
-            segments = transcribe_file(model, media_path, language)
+            def on_fraction(frac, _i=i, _f=media_path):
+                progress_callback("progress", {"index": _i, "total": total, "file": _f, "fraction": frac})
+
+            segments = transcribe_file(model, media_path, language, task, on_fraction)
             srt_content = segments_to_srt(segments)
             srt_path.write_text(srt_content, encoding="utf-8")
             # Also write a .txt copy with the same SRT-formatted content.

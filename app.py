@@ -1,8 +1,9 @@
-"""WhisperDrop — drag-and-drop Cantonese/Chinese media transcriber."""
+"""WhisperDrop — drag-and-drop media transcriber."""
 
 import queue
+import subprocess
+import sys
 import threading
-import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -23,6 +24,10 @@ TEXT = "#e0e0f0"
 SUBTEXT = "#888aaa"
 GREEN = "#4ade80"
 RED = "#f87171"
+
+LANG_LABELS = list(transcribe.LANGUAGES.values())
+LANG_CODES = list(transcribe.LANGUAGES.keys())
+DEFAULT_LANG_LABEL = transcribe.LANGUAGES[transcribe.DEFAULT_LANGUAGE]
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -45,6 +50,14 @@ def parse_dropped(raw: str) -> list[Path]:
     return paths
 
 
+def reveal_in_finder(folder: Path):
+    folder.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(folder)])
+    else:
+        subprocess.run(["xdg-open", str(folder)])
+
+
 # ── main window ──────────────────────────────────────────────────────────────
 class WhisperDropApp(TkinterDnD.Tk):
     def __init__(self):
@@ -52,7 +65,7 @@ class WhisperDropApp(TkinterDnD.Tk):
         self.title("WhisperDrop")
         self.configure(bg=BG)
         self.resizable(True, True)
-        self.minsize(640, 520)
+        self.minsize(680, 600)
 
         self._queued_files: list[Path] = []
         self._job_queue: queue.Queue = queue.Queue()
@@ -62,14 +75,13 @@ class WhisperDropApp(TkinterDnD.Tk):
         self._model = None
         self._loaded_model_name = None
         self._durations: list[float] = []
+        self._failed_files: list[Path] = []
 
         self._build_ui()
         self.after(100, self._poll_ui_queue)
 
     # ── UI construction ──────────────────────────────────────────────────────
     def _build_ui(self):
-        pad = dict(padx=14, pady=6)
-
         # ── drop zone ────────────────────────────────────────────────────────
         self._drop_frame = tk.Frame(self, bg=SURFACE, bd=0, relief="flat",
                                     highlightthickness=2, highlightbackground=ACCENT)
@@ -85,40 +97,82 @@ class WhisperDropApp(TkinterDnD.Tk):
             w.drop_target_register(DND_FILES)
             w.dnd_bind("<<Drop>>", self._on_drop)
 
-        # ── controls row ─────────────────────────────────────────────────────
-        ctrl = tk.Frame(self, bg=BG)
-        ctrl.pack(fill="x", padx=16, pady=4)
+        # ── controls row 1: model + language ────────────────────────────────
+        ctrl1 = tk.Frame(self, bg=BG)
+        ctrl1.pack(fill="x", padx=16, pady=(4, 0))
 
-        tk.Label(ctrl, text="Model:", fg=SUBTEXT, bg=BG,
+        tk.Label(ctrl1, text="Model:", fg=SUBTEXT, bg=BG,
                  font=("SF Pro Text", 12)).pack(side="left")
         self._model_var = tk.StringVar(value=DEFAULT_MODEL)
-        model_menu = ttk.Combobox(ctrl, textvariable=self._model_var,
-                                   values=MODELS, state="readonly", width=8)
-        model_menu.pack(side="left", padx=(4, 16))
+        ttk.Combobox(ctrl1, textvariable=self._model_var, values=MODELS,
+                     state="readonly", width=8).pack(side="left", padx=(4, 16))
 
-        tk.Label(ctrl, text="Output:", fg=SUBTEXT, bg=BG,
+        tk.Label(ctrl1, text="Language:", fg=SUBTEXT, bg=BG,
+                 font=("SF Pro Text", 12)).pack(side="left")
+        self._lang_var = tk.StringVar(value=DEFAULT_LANG_LABEL)
+        ttk.Combobox(ctrl1, textvariable=self._lang_var, values=LANG_LABELS,
+                     state="readonly", width=22).pack(side="left", padx=(4, 16))
+
+        self._translate_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            ctrl1, text="Translate to English", variable=self._translate_var,
+            fg=TEXT, bg=BG, selectcolor=SURFACE, activebackground=BG,
+            activeforeground=TEXT, font=("SF Pro Text", 12),
+        ).pack(side="left")
+
+        # ── controls row 2: output folder ───────────────────────────────────
+        ctrl2 = tk.Frame(self, bg=BG)
+        ctrl2.pack(fill="x", padx=16, pady=(6, 4))
+
+        tk.Label(ctrl2, text="Output:", fg=SUBTEXT, bg=BG,
                  font=("SF Pro Text", 12)).pack(side="left")
         self._output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
-        tk.Entry(ctrl, textvariable=self._output_var, width=32,
+        tk.Entry(ctrl2, textvariable=self._output_var, width=32,
                  bg=SURFACE, fg=TEXT, insertbackground=TEXT,
                  relief="flat", font=("SF Mono", 11)).pack(side="left", padx=(4, 6))
-        tk.Button(ctrl, text="…", command=self._pick_output,
+        tk.Button(ctrl2, text="…", command=self._pick_output,
                   bg=SURFACE, fg=TEXT, relief="flat",
-                  font=("SF Pro Text", 12), padx=6).pack(side="left")
+                  font=("SF Pro Text", 12), padx=6).pack(side="left", padx=(0, 6))
+        tk.Button(ctrl2, text="Open output folder", command=self._open_output,
+                  bg=SURFACE, fg=TEXT, relief="flat",
+                  font=("SF Pro Text", 11), padx=8).pack(side="left")
 
-        # ── ETA bar ──────────────────────────────────────────────────────────
+        # ── overall progress ─────────────────────────────────────────────────
         self._eta_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self._eta_var, fg=ACCENT, bg=BG,
-                 font=("SF Pro Text", 12)).pack(anchor="w", padx=16, pady=(4, 0))
+                 font=("SF Pro Text", 12)).pack(anchor="w", padx=16, pady=(8, 2))
+
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Overall.Horizontal.TProgressbar", troughcolor=SURFACE,
+                        background=ACCENT, bordercolor=SURFACE, lightcolor=ACCENT, darkcolor=ACCENT)
+        self._overall_bar = ttk.Progressbar(
+            self, style="Overall.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", maximum=100,
+        )
+        self._overall_bar.pack(fill="x", padx=16, pady=(0, 6))
+
+        # ── current file progress ───────────────────────────────────────────
+        self._file_progress_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self._file_progress_var, fg=SUBTEXT, bg=BG,
+                 font=("SF Pro Text", 11)).pack(anchor="w", padx=16)
+
+        style.configure("File.Horizontal.TProgressbar", troughcolor=SURFACE,
+                        background=GREEN, bordercolor=SURFACE, lightcolor=GREEN, darkcolor=GREEN)
+        self._file_bar = ttk.Progressbar(
+            self, style="File.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", maximum=100,
+        )
+        self._file_bar.pack(fill="x", padx=16, pady=(0, 8))
 
         # ── file queue list ──────────────────────────────────────────────────
         list_frame = tk.Frame(self, bg=BG)
-        list_frame.pack(fill="both", expand=True, padx=16, pady=(4, 0))
+        list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 0))
 
         self._listbox = tk.Listbox(
             list_frame, bg=SURFACE, fg=TEXT, selectbackground=ACCENT,
             font=("SF Mono", 11), relief="flat", bd=0,
-            activestyle="none", height=8,
+            activestyle="none", height=7,
         )
         scrollbar = tk.Scrollbar(list_frame, orient="vertical",
                                   command=self._listbox.yview)
@@ -126,13 +180,23 @@ class WhisperDropApp(TkinterDnD.Tk):
         self._listbox.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        # ── reorder / remove controls ───────────────────────────────────────
+        order_frame = tk.Frame(list_frame, bg=BG)
+        order_frame.pack(side="left", fill="y", padx=(8, 0))
+        for label, cmd in (
+            ("↑", self._move_up), ("↓", self._move_down), ("✕", self._remove_selected),
+        ):
+            tk.Button(order_frame, text=label, command=cmd,
+                      bg=SURFACE, fg=TEXT, relief="flat",
+                      font=("SF Pro Text", 12), width=2).pack(pady=2)
+
         # ── log ──────────────────────────────────────────────────────────────
         log_frame = tk.Frame(self, bg=BG)
         log_frame.pack(fill="both", expand=True, padx=16, pady=(6, 6))
 
         self._log = tk.Text(
             log_frame, bg=SURFACE, fg=TEXT, font=("SF Mono", 10),
-            relief="flat", bd=0, state="disabled", height=7,
+            relief="flat", bd=0, state="disabled", height=6,
             wrap="word",
         )
         log_scroll = tk.Scrollbar(log_frame, orient="vertical", command=self._log.yview)
@@ -149,12 +213,20 @@ class WhisperDropApp(TkinterDnD.Tk):
             relief="flat", padx=32, pady=8, cursor="hand2",
         )
         self._run_btn.pack()
+        bottom_row = tk.Frame(btn_frame, bg=BG)
+        bottom_row.pack(pady=(6, 0))
         self._clear_btn = tk.Button(
-            btn_frame, text="Clear queue", command=self._clear_queue,
+            bottom_row, text="Clear queue", command=self._clear_queue,
             bg=SURFACE, fg=SUBTEXT, font=("SF Pro Text", 11),
             relief="flat", padx=12, pady=4, cursor="hand2",
         )
-        self._clear_btn.pack(pady=(6, 0))
+        self._clear_btn.pack(side="left", padx=4)
+        self._retry_btn = tk.Button(
+            bottom_row, text="Retry failed", command=self._retry_failed,
+            bg=SURFACE, fg=SUBTEXT, font=("SF Pro Text", 11),
+            relief="flat", padx=12, pady=4, cursor="hand2",
+        )
+        self._retry_btn.pack(side="left", padx=4)
 
     # ── event handlers ───────────────────────────────────────────────────────
     def _on_drop(self, event):
@@ -175,12 +247,63 @@ class WhisperDropApp(TkinterDnD.Tk):
         if folder:
             self._output_var.set(folder)
 
+    def _open_output(self):
+        reveal_in_finder(Path(self._output_var.get()))
+
     def _clear_queue(self):
         if self._running:
             return
         self._queued_files.clear()
         self._listbox.delete(0, "end")
         self._eta_var.set("")
+        self._reset_progress_bars()
+
+    def _selected_index(self):
+        sel = self._listbox.curselection()
+        return sel[0] if sel else None
+
+    def _move_up(self):
+        if self._running:
+            return
+        i = self._selected_index()
+        if i is None or i == 0:
+            return
+        self._queued_files[i - 1], self._queued_files[i] = self._queued_files[i], self._queued_files[i - 1]
+        self._refresh_listbox()
+        self._listbox.selection_set(i - 1)
+
+    def _move_down(self):
+        if self._running:
+            return
+        i = self._selected_index()
+        if i is None or i >= len(self._queued_files) - 1:
+            return
+        self._queued_files[i + 1], self._queued_files[i] = self._queued_files[i], self._queued_files[i + 1]
+        self._refresh_listbox()
+        self._listbox.selection_set(i + 1)
+
+    def _remove_selected(self):
+        if self._running:
+            return
+        i = self._selected_index()
+        if i is None:
+            return
+        del self._queued_files[i]
+        self._refresh_listbox()
+
+    def _retry_failed(self):
+        if self._running or not self._failed_files:
+            return
+        for f in self._failed_files:
+            if f not in self._queued_files:
+                self._queued_files.append(f)
+        self._failed_files = []
+        self._refresh_listbox()
+
+    def _refresh_listbox(self):
+        self._listbox.delete(0, "end")
+        for f in self._queued_files:
+            self._listbox.insert("end", f"{STATUS_ICONS['waiting']}  {f.name}")
 
     def _toggle_run(self):
         if self._running:
@@ -197,22 +320,23 @@ class WhisperDropApp(TkinterDnD.Tk):
         self._stop_flag = False
         self._running = True
         self._durations.clear()
+        self._failed_files = []
+        self._reset_progress_bars()
         self._run_btn.config(text="Cancel", bg=RED)
-
-        for f in self._queued_files:
-            self._job_queue.put(f)
 
         model_name = self._model_var.get()
         output_folder = Path(self._output_var.get())
+        lang_code = LANG_CODES[LANG_LABELS.index(self._lang_var.get())]
+        task = "translate" if self._translate_var.get() else "transcribe"
 
         thread = threading.Thread(
             target=self._worker,
-            args=(model_name, output_folder, list(self._queued_files)),
+            args=(model_name, output_folder, list(self._queued_files), lang_code, task),
             daemon=True,
         )
         thread.start()
 
-    def _worker(self, model_name: str, output_folder: Path, files: list[Path]):
+    def _worker(self, model_name, output_folder, files, lang_code, task):
         self._ui_put(("log", f"Loading model '{model_name}'…\n"))
 
         if self._loaded_model_name != model_name:
@@ -225,9 +349,10 @@ class WhisperDropApp(TkinterDnD.Tk):
             model=self._model,
             files=files,
             output_folder=output_folder,
-            language="zh",
+            language=lang_code,
             progress_callback=self._on_progress,
             stop_flag=lambda: self._stop_flag,
+            task=task,
         )
 
     def _on_progress(self, event: str, data: dict):
@@ -257,23 +382,36 @@ class WhisperDropApp(TkinterDnD.Tk):
         idx = self._queued_files.index(f) if f in self._queued_files else -1
 
         if event == "skip":
-            self._update_list_item(idx, f"skip", f.name)
+            self._update_list_item(idx, "skip", f.name)
             self._log_append(f"[{i}/{n}] Skipped (already done): {f.name}\n")
+            self._overall_bar["value"] = (i / n) * 100
 
         elif event == "start":
             self._update_list_item(idx, "processing", f.name)
             self._log_append(f"[{i}/{n}] Transcribing: {f.name}\n")
+            self._file_bar["value"] = 0
+            self._file_progress_var.set(f"{f.name} — 0%")
+
+        elif event == "progress":
+            pct = int(data["fraction"] * 100)
+            self._file_bar["value"] = pct
+            self._file_progress_var.set(f"{f.name} — {pct}%")
 
         elif event == "done":
             elapsed = data["elapsed"]
             self._durations.append(elapsed)
             self._update_list_item(idx, "done", f.name)
             self._log_append(f"  ✅ Done in {elapsed:.1f}s\n")
+            self._file_bar["value"] = 100
+            self._file_progress_var.set(f"{f.name} — 100%")
+            self._overall_bar["value"] = (i / n) * 100
             self._update_eta(i, n)
 
         elif event == "error":
             self._update_list_item(idx, "error", f.name)
             self._log_append(f"  ❌ Error: {data['error']}\n")
+            self._failed_files.append(f)
+            self._overall_bar["value"] = (i / n) * 100
             self._update_eta(i, n)
 
         elif event == "finish":
@@ -283,6 +421,7 @@ class WhisperDropApp(TkinterDnD.Tk):
                 f"SRT files saved to: {self._output_var.get()}\n"
             )
             self._eta_var.set("")
+            self._file_progress_var.set("")
             self._running = False
             self._stop_flag = False
             self._run_btn.config(text="Run", bg=ACCENT, state="normal")
@@ -305,6 +444,11 @@ class WhisperDropApp(TkinterDnD.Tk):
         else:
             eta_str = f"~{int(secs)}s"
         self._eta_var.set(f"Processing {completed}/{total} — Est. remaining: {eta_str}")
+
+    def _reset_progress_bars(self):
+        self._overall_bar["value"] = 0
+        self._file_bar["value"] = 0
+        self._file_progress_var.set("")
 
     def _log_append(self, text: str):
         self._log.config(state="normal")
