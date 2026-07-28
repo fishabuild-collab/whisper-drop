@@ -42,6 +42,10 @@ LANGUAGES = {
     "pt": "Portuguese",
 }
 DEFAULT_LANGUAGE = "zh"
+DEFAULT_MAX_CHARS = 42
+MIN_MAX_CHARS = 20
+MAX_MAX_CHARS = 80
+_BLOCK_MAX_DURATION = 5.0  # seconds, not user-configurable — keeps blocks readable
 
 _TS_RE = re.compile(r"\[([\d:.]+)\s*-->\s*([\d:.]+)\]")
 
@@ -81,6 +85,55 @@ def segments_to_srt(segments) -> str:
         end = seconds_to_srt_timestamp(seg["end"])
         text = seg["text"].strip()
         lines.append(f"{i}\n{start} --> {end}\n{text}\n")
+    return "\n".join(lines)
+
+
+def _flatten_words(segments) -> list[dict]:
+    words = []
+    for seg in segments:
+        words.extend(seg.get("words") or [])
+    return words
+
+
+def words_to_blocks(
+    words: list[dict],
+    max_chars: int = DEFAULT_MAX_CHARS,
+    max_duration: float = _BLOCK_MAX_DURATION,
+) -> list[tuple[float, float, str]]:
+    """Group word-level timestamps into short subtitle blocks."""
+    blocks = []
+    cur_words: list[dict] = []
+    cur_start = None
+
+    for w in words:
+        text = w["word"].strip()
+        if not text:
+            continue
+        if cur_start is None:
+            cur_start = w["start"]
+
+        candidate = " ".join([x["word"].strip() for x in cur_words] + [text])
+        too_long = len(candidate) > max_chars
+        too_slow = (w["end"] - cur_start) > max_duration
+        ends_sentence = cur_words and cur_words[-1]["word"].strip()[-1:] in ".!?。！？"
+
+        if cur_words and (too_long or too_slow or ends_sentence):
+            blocks.append((cur_start, cur_words[-1]["end"],
+                            " ".join(x["word"].strip() for x in cur_words)))
+            cur_words, cur_start = [], w["start"]
+
+        cur_words.append(w)
+
+    if cur_words:
+        blocks.append((cur_start, cur_words[-1]["end"],
+                        " ".join(x["word"].strip() for x in cur_words)))
+    return blocks
+
+
+def blocks_to_srt(blocks: list[tuple[float, float, str]]) -> str:
+    lines = []
+    for i, (start, end, text) in enumerate(blocks, start=1):
+        lines.append(f"{i}\n{seconds_to_srt_timestamp(start)} --> {seconds_to_srt_timestamp(end)}\n{text}\n")
     return "\n".join(lines)
 
 
@@ -137,18 +190,20 @@ def transcribe_file(
     language: str = DEFAULT_LANGUAGE,
     task: str = "transcribe",
     on_fraction=None,
-) -> list[dict]:
+) -> dict:
+    """Returns Whisper's raw result dict (segments include word-level timestamps)."""
     lang_arg = None if language == "auto" else language
     duration = get_duration(media_path) if on_fraction else None
 
-    kwargs = dict(language=lang_arg, task=task, fp16=False, verbose=True)
+    kwargs = dict(language=lang_arg, task=task, fp16=False, verbose=True, word_timestamps=True)
 
     def _run():
         return model.transcribe(str(media_path), **kwargs)
 
+    import contextlib
+
     if on_fraction and duration:
         capture = _ProgressCapture(duration, on_fraction)
-        import contextlib
         try:
             with contextlib.redirect_stdout(capture):
                 result = _run()
@@ -158,7 +213,6 @@ def transcribe_file(
                 result = _run()
         on_fraction(1.0)
     else:
-        import contextlib
         with contextlib.redirect_stdout(io.StringIO()):
             try:
                 result = _run()
@@ -166,7 +220,7 @@ def transcribe_file(
                 kwargs.pop("language", None)
                 result = _run()
 
-    return result["segments"]
+    return result
 
 
 def run_batch(
@@ -177,6 +231,7 @@ def run_batch(
     progress_callback,
     stop_flag,
     task: str = "transcribe",
+    max_chars: int = DEFAULT_MAX_CHARS,
 ):
     """
     Transcribe a list of files.
@@ -209,8 +264,13 @@ def run_batch(
             def on_fraction(frac, _i=i, _f=media_path):
                 progress_callback("progress", {"index": _i, "total": total, "file": _f, "fraction": frac})
 
-            segments = transcribe_file(model, media_path, language, task, on_fraction)
-            srt_content = segments_to_srt(segments)
+            result = transcribe_file(model, media_path, language, task, on_fraction)
+            words = _flatten_words(result["segments"])
+            if words:
+                blocks = words_to_blocks(words, max_chars=max_chars)
+                srt_content = blocks_to_srt(blocks)
+            else:
+                srt_content = segments_to_srt(result["segments"])
             srt_path.write_text(srt_content, encoding="utf-8")
             # Also write a .txt copy with the same SRT-formatted content.
             txt_path = output_folder / (media_path.stem + ".txt")

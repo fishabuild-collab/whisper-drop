@@ -17,13 +17,18 @@ MODELS = ["tiny", "base", "small", "medium", "large"]
 DEFAULT_MODEL = "medium"
 DEFAULT_OUTPUT = Path.home() / "Desktop" / "WhisperDrop" / "output"
 STATUS_ICONS = {"waiting": "⏳", "processing": "🔄", "done": "✅", "error": "❌", "skip": "⏭️"}
-BG = "#1e1e2e"
-SURFACE = "#2a2a3e"
-ACCENT = "#7c6af7"
-TEXT = "#e0e0f0"
-SUBTEXT = "#888aaa"
-GREEN = "#4ade80"
-RED = "#f87171"
+
+# Warm, paper-like palette — no purple, no neon "tech brand" gradients.
+BG = "#F5F4EE"          # cream page background
+SURFACE = "#EEEBE2"     # slightly darker cream for panels/inputs
+SURFACE_ALT = "#FFFFFF" # white for the drop zone, to pop off the cream
+ACCENT = "#C15F3C"      # clay / terracotta — primary actions
+ACCENT_HOVER = "#A94E2F"
+TEXT = "#30291F"        # warm near-black
+SUBTEXT = "#8A8171"     # muted warm grey
+BORDER = "#DED8C7"      # soft tan border
+GREEN = "#6E8F5C"       # muted sage — success accent
+RED = "#96402A"         # deeper brick — errors/cancel (same warm family, clearly darker than ACCENT)
 
 LANG_LABELS = list(transcribe.LANGUAGES.values())
 LANG_CODES = list(transcribe.LANGUAGES.keys())
@@ -83,19 +88,21 @@ class WhisperDropApp(TkinterDnD.Tk):
     # ── UI construction ──────────────────────────────────────────────────────
     def _build_ui(self):
         # ── drop zone ────────────────────────────────────────────────────────
-        self._drop_frame = tk.Frame(self, bg=SURFACE, bd=0, relief="flat",
-                                    highlightthickness=2, highlightbackground=ACCENT)
+        self._drop_frame = tk.Frame(self, bg=SURFACE_ALT, bd=0, relief="flat",
+                                    highlightthickness=2, highlightbackground=BORDER)
         self._drop_frame.pack(fill="x", padx=16, pady=(16, 6))
         self._drop_label = tk.Label(
             self._drop_frame,
             text="Drop media files or a folder here",
             font=("SF Pro Display", 15),
-            fg=SUBTEXT, bg=SURFACE, pady=28,
+            fg=SUBTEXT, bg=SURFACE_ALT, pady=28,
         )
         self._drop_label.pack(fill="x")
         for w in (self._drop_frame, self._drop_label):
             w.drop_target_register(DND_FILES)
             w.dnd_bind("<<Drop>>", self._on_drop)
+            w.dnd_bind("<<DropEnter>>", self._on_drag_enter)
+            w.dnd_bind("<<DropLeave>>", self._on_drag_leave)
 
         # ── controls row 1: model + language ────────────────────────────────
         ctrl1 = tk.Frame(self, bg=BG)
@@ -136,6 +143,36 @@ class WhisperDropApp(TkinterDnD.Tk):
         tk.Button(ctrl2, text="Open output folder", command=self._open_output,
                   bg=SURFACE, fg=TEXT, relief="flat",
                   font=("SF Pro Text", 11), padx=8).pack(side="left")
+
+        # ── controls row 3: characters per line ─────────────────────────────
+        ctrl3 = tk.Frame(self, bg=BG)
+        ctrl3.pack(fill="x", padx=16, pady=(2, 4))
+
+        tk.Label(ctrl3, text="Characters per line:", fg=SUBTEXT, bg=BG,
+                 font=("SF Pro Text", 12)).pack(side="left")
+
+        self._max_chars_var = tk.IntVar(value=transcribe.DEFAULT_MAX_CHARS)
+
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Warm.Horizontal.TScale", background=BG, troughcolor=SURFACE)
+
+        self._max_chars_scale = ttk.Scale(
+            ctrl3, from_=transcribe.MIN_MAX_CHARS, to=transcribe.MAX_MAX_CHARS,
+            orient="horizontal", style="Warm.Horizontal.TScale", length=180,
+            command=self._on_scale_change,
+        )
+        self._max_chars_scale.set(transcribe.DEFAULT_MAX_CHARS)
+        self._max_chars_scale.pack(side="left", padx=(6, 8))
+
+        self._max_chars_entry = tk.Entry(
+            ctrl3, textvariable=self._max_chars_var, width=4,
+            bg=SURFACE, fg=TEXT, insertbackground=TEXT,
+            relief="flat", font=("SF Mono", 11), justify="center",
+        )
+        self._max_chars_entry.pack(side="left")
+        self._max_chars_entry.bind("<Return>", self._on_entry_change)
+        self._max_chars_entry.bind("<FocusOut>", self._on_entry_change)
 
         # ── overall progress ─────────────────────────────────────────────────
         self._eta_var = tk.StringVar(value="")
@@ -230,6 +267,7 @@ class WhisperDropApp(TkinterDnD.Tk):
 
     # ── event handlers ───────────────────────────────────────────────────────
     def _on_drop(self, event):
+        self._on_drag_leave(event)
         dropped = parse_dropped(event.data)
         new_files = transcribe.find_media_files(dropped)
         already = set(self._queued_files)
@@ -241,6 +279,26 @@ class WhisperDropApp(TkinterDnD.Tk):
         if self._running:
             for f in added:
                 self._job_queue.put(f)
+
+    def _on_drag_enter(self, event):
+        self._drop_frame.configure(highlightbackground=ACCENT)
+        self._drop_label.configure(text="Release to add files", fg=ACCENT)
+
+    def _on_drag_leave(self, event):
+        self._drop_frame.configure(highlightbackground=BORDER)
+        self._drop_label.configure(text="Drop media files or a folder here", fg=SUBTEXT)
+
+    def _on_scale_change(self, value):
+        self._max_chars_var.set(round(float(value)))
+
+    def _on_entry_change(self, event):
+        try:
+            v = int(self._max_chars_var.get())
+        except (ValueError, tk.TclError):
+            v = transcribe.DEFAULT_MAX_CHARS
+        v = max(transcribe.MIN_MAX_CHARS, min(transcribe.MAX_MAX_CHARS, v))
+        self._max_chars_var.set(v)
+        self._max_chars_scale.set(v)
 
     def _pick_output(self):
         folder = filedialog.askdirectory(initialdir=self._output_var.get())
@@ -324,19 +382,22 @@ class WhisperDropApp(TkinterDnD.Tk):
         self._reset_progress_bars()
         self._run_btn.config(text="Cancel", bg=RED)
 
+        self._on_entry_change(None)  # normalize/clamp any typed value before using it
+
         model_name = self._model_var.get()
         output_folder = Path(self._output_var.get())
         lang_code = LANG_CODES[LANG_LABELS.index(self._lang_var.get())]
         task = "translate" if self._translate_var.get() else "transcribe"
+        max_chars = self._max_chars_var.get()
 
         thread = threading.Thread(
             target=self._worker,
-            args=(model_name, output_folder, list(self._queued_files), lang_code, task),
+            args=(model_name, output_folder, list(self._queued_files), lang_code, task, max_chars),
             daemon=True,
         )
         thread.start()
 
-    def _worker(self, model_name, output_folder, files, lang_code, task):
+    def _worker(self, model_name, output_folder, files, lang_code, task, max_chars):
         self._ui_put(("log", f"Loading model '{model_name}'…\n"))
 
         if self._loaded_model_name != model_name:
@@ -353,6 +414,7 @@ class WhisperDropApp(TkinterDnD.Tk):
             progress_callback=self._on_progress,
             stop_flag=lambda: self._stop_flag,
             task=task,
+            max_chars=max_chars,
         )
 
     def _on_progress(self, event: str, data: dict):
