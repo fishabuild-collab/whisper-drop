@@ -101,11 +101,15 @@ class RoundedButton(tk.Canvas):
         text_h = tmp.winfo_reqheight()
         tmp.destroy()
 
-        self._w = width or (text_w + padx * 2)
-        self._h = height or (text_h + pady * 2)
+        # NOTE: cannot name these self._w/self._h — tkinter's Widget base
+        # class reserves `_w` internally for the widget's Tcl pathname and
+        # overwrites it inside super().__init__(), silently clobbering
+        # anything we set beforehand.
+        self._btn_w = width or (text_w + padx * 2)
+        self._btn_h = height or (text_h + pady * 2)
 
         parent_bg = parent["bg"] if "bg" in parent.keys() else BG
-        super().__init__(parent, width=self._w, height=self._h,
+        super().__init__(parent, width=self._btn_w, height=self._btn_h,
                           bg=parent_bg, highlightthickness=0, bd=0)
 
         self._redraw()
@@ -122,10 +126,10 @@ class RoundedButton(tk.Canvas):
         else:
             fill = self._bg
         self.create_polygon(
-            _round_rect_points(1, 1, self._w - 1, self._h - 1, self._radius),
+            _round_rect_points(1, 1, self._btn_w - 1, self._btn_h - 1, self._radius),
             smooth=True, fill=fill, outline=fill,
         )
-        self.create_text(self._w / 2, self._h / 2, text=self._text,
+        self.create_text(self._btn_w / 2, self._btn_h / 2, text=self._text,
                           fill=self._fg, font=self._font)
 
     def _on_enter(self, _e):
