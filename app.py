@@ -28,7 +28,9 @@ TEXT = "#30291F"        # warm near-black
 SUBTEXT = "#8A8171"     # muted warm grey
 BORDER = "#DED8C7"      # soft tan border
 GREEN = "#6E8F5C"       # muted sage — success accent
-RED = "#96402A"         # deeper brick — errors/cancel (same warm family, clearly darker than ACCENT)
+RED = "#96402A"         # deeper brick — errors/cancel
+RED_HOVER = "#7C331F"
+DISABLED = "#C9C2B2"    # muted tan — disabled button fill
 
 LANG_LABELS = list(transcribe.LANGUAGES.values())
 LANG_CODES = list(transcribe.LANGUAGES.keys())
@@ -63,6 +65,141 @@ def reveal_in_finder(folder: Path):
         subprocess.run(["xdg-open", str(folder)])
 
 
+def _round_rect_points(x1, y1, x2, y2, r):
+    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+    return [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+
+
+class RoundedButton(tk.Canvas):
+    """A flat, rounded-rectangle button drawn on a Canvas.
+
+    Sidesteps Tk's native macOS button chrome (thick borders, system
+    gradient fill that ignores `bg`) entirely by drawing everything itself.
+    """
+
+    def __init__(self, parent, text, command=None, radius=10, bg=ACCENT, fg="white",
+                 hover_bg=None, disabled_bg=DISABLED, font=("SF Pro Text", 13),
+                 padx=22, pady=9, width=None, height=None):
+        self._bg = bg
+        self._hover_bg = hover_bg or bg
+        self._disabled_bg = disabled_bg
+        self._fg = fg
+        self._font = font
+        self._command = command
+        self._radius = radius
+        self._text = text
+        self._enabled = True
+        self._hovering = False
+
+        tmp = tk.Label(parent, text=text, font=font)
+        tmp.update_idletasks()
+        text_w = tmp.winfo_reqwidth()
+        text_h = tmp.winfo_reqheight()
+        tmp.destroy()
+
+        self._w = width or (text_w + padx * 2)
+        self._h = height or (text_h + pady * 2)
+
+        parent_bg = parent["bg"] if "bg" in parent.keys() else BG
+        super().__init__(parent, width=self._w, height=self._h,
+                          bg=parent_bg, highlightthickness=0, bd=0)
+
+        self._redraw()
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+
+    def _redraw(self):
+        self.delete("all")
+        if not self._enabled:
+            fill = self._disabled_bg
+        elif self._hovering:
+            fill = self._hover_bg
+        else:
+            fill = self._bg
+        self.create_polygon(
+            _round_rect_points(1, 1, self._w - 1, self._h - 1, self._radius),
+            smooth=True, fill=fill, outline=fill,
+        )
+        self.create_text(self._w / 2, self._h / 2, text=self._text,
+                          fill=self._fg, font=self._font)
+
+    def _on_enter(self, _e):
+        if self._enabled:
+            self._hovering = True
+            self.configure(cursor="hand2")
+            self._redraw()
+
+    def _on_leave(self, _e):
+        self._hovering = False
+        self._redraw()
+
+    def _on_click(self, _e):
+        if self._enabled and self._command:
+            self._command()
+
+    def set_text(self, text: str):
+        self._text = text
+        self._redraw()
+
+    def set_bg(self, bg: str, hover_bg: str = None):
+        self._bg = bg
+        self._hover_bg = hover_bg or bg
+        self._redraw()
+
+    def set_enabled(self, enabled: bool):
+        self._enabled = enabled
+        self._redraw()
+
+
+class RoundedDropZone(tk.Canvas):
+    """Rounded-rectangle drop target with an embedded label."""
+
+    def __init__(self, parent, text, radius=16, height=110):
+        parent_bg = parent["bg"] if "bg" in parent.keys() else BG
+        super().__init__(parent, height=height, bg=parent_bg, highlightthickness=0, bd=0)
+        self._radius = radius
+        self._default_text = text
+        self._border_color = BORDER
+        self._label = tk.Label(self, text=text, font=("SF Pro Display", 15),
+                                fg=SUBTEXT, bg=SURFACE_ALT)
+        self.bind("<Configure>", self._on_resize)
+
+    def _on_resize(self, _e):
+        self._redraw()
+
+    def _redraw(self):
+        self.delete("shape")
+        w, h = self.winfo_width(), self.winfo_height()
+        if w < 2 or h < 2:
+            return
+        self.create_polygon(
+            _round_rect_points(1, 1, w - 1, h - 1, self._radius),
+            smooth=True, fill=SURFACE_ALT, outline=self._border_color, width=2, tags="shape",
+        )
+        self.tag_lower("shape")
+        self._label.place(relx=0.5, rely=0.5, anchor="center")
+
+    def set_hover(self, hovering: bool):
+        self._border_color = ACCENT if hovering else BORDER
+        self._label.configure(
+            text="Release to add files" if hovering else self._default_text,
+            fg=ACCENT if hovering else SUBTEXT,
+        )
+        self._redraw()
+
+    def register_drop_targets(self, on_drop, on_enter, on_leave):
+        for w in (self, self._label):
+            w.drop_target_register(DND_FILES)
+            w.dnd_bind("<<Drop>>", on_drop)
+            w.dnd_bind("<<DropEnter>>", on_enter)
+            w.dnd_bind("<<DropLeave>>", on_leave)
+
+
 # ── main window ──────────────────────────────────────────────────────────────
 class WhisperDropApp(TkinterDnD.Tk):
     def __init__(self):
@@ -70,7 +207,7 @@ class WhisperDropApp(TkinterDnD.Tk):
         self.title("WhisperDrop")
         self.configure(bg=BG)
         self.resizable(True, True)
-        self.minsize(680, 600)
+        self.minsize(680, 620)
 
         self._queued_files: list[Path] = []
         self._job_queue: queue.Queue = queue.Queue()
@@ -82,27 +219,45 @@ class WhisperDropApp(TkinterDnD.Tk):
         self._durations: list[float] = []
         self._failed_files: list[Path] = []
 
+        self._init_style()
         self._build_ui()
         self.after(100, self._poll_ui_queue)
+
+    # ── ttk styling ───────────────────────────────────────────────────────────
+    def _init_style(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+
+        style.configure("Warm.Horizontal.TScale", background=BG, troughcolor=SURFACE,
+                        lightcolor=ACCENT, darkcolor=ACCENT)
+        style.map("Warm.Horizontal.TScale", background=[("active", BG)])
+
+        style.configure("Overall.Horizontal.TProgressbar", troughcolor=SURFACE,
+                        background=ACCENT, bordercolor=SURFACE, lightcolor=ACCENT, darkcolor=ACCENT)
+        style.configure("File.Horizontal.TProgressbar", troughcolor=SURFACE,
+                        background=GREEN, bordercolor=SURFACE, lightcolor=GREEN, darkcolor=GREEN)
+
+        style.configure("Warm.TCombobox", fieldbackground=SURFACE, background=SURFACE,
+                        foreground=TEXT, arrowcolor=SUBTEXT, bordercolor=BORDER,
+                        lightcolor=SURFACE, darkcolor=SURFACE, relief="flat")
+        style.map("Warm.TCombobox",
+                  fieldbackground=[("readonly", SURFACE), ("disabled", SURFACE)],
+                  foreground=[("readonly", TEXT), ("disabled", SUBTEXT)],
+                  selectbackground=[("readonly", SURFACE)],
+                  selectforeground=[("readonly", TEXT)],
+                  background=[("readonly", SURFACE)])
+        # Combobox dropdown list colors are controlled via option db, not style.
+        self.option_add("*TCombobox*Listbox.background", SURFACE)
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.option_add("*TCombobox*Listbox.selectForeground", "white")
 
     # ── UI construction ──────────────────────────────────────────────────────
     def _build_ui(self):
         # ── drop zone ────────────────────────────────────────────────────────
-        self._drop_frame = tk.Frame(self, bg=SURFACE_ALT, bd=0, relief="flat",
-                                    highlightthickness=2, highlightbackground=BORDER)
-        self._drop_frame.pack(fill="x", padx=16, pady=(16, 6))
-        self._drop_label = tk.Label(
-            self._drop_frame,
-            text="Drop media files or a folder here",
-            font=("SF Pro Display", 15),
-            fg=SUBTEXT, bg=SURFACE_ALT, pady=28,
-        )
-        self._drop_label.pack(fill="x")
-        for w in (self._drop_frame, self._drop_label):
-            w.drop_target_register(DND_FILES)
-            w.dnd_bind("<<Drop>>", self._on_drop)
-            w.dnd_bind("<<DropEnter>>", self._on_drag_enter)
-            w.dnd_bind("<<DropLeave>>", self._on_drag_leave)
+        self._drop_zone = RoundedDropZone(self, "Drop media files or a folder here")
+        self._drop_zone.pack(fill="x", padx=16, pady=(16, 6))
+        self._drop_zone.register_drop_targets(self._on_drop, self._on_drag_enter, self._on_drag_leave)
 
         # ── controls row 1: model + language ────────────────────────────────
         ctrl1 = tk.Frame(self, bg=BG)
@@ -112,50 +267,49 @@ class WhisperDropApp(TkinterDnD.Tk):
                  font=("SF Pro Text", 12)).pack(side="left")
         self._model_var = tk.StringVar(value=DEFAULT_MODEL)
         ttk.Combobox(ctrl1, textvariable=self._model_var, values=MODELS,
-                     state="readonly", width=8).pack(side="left", padx=(4, 16))
+                     state="readonly", width=8, style="Warm.TCombobox").pack(side="left", padx=(4, 16))
 
         tk.Label(ctrl1, text="Language:", fg=SUBTEXT, bg=BG,
                  font=("SF Pro Text", 12)).pack(side="left")
         self._lang_var = tk.StringVar(value=DEFAULT_LANG_LABEL)
         ttk.Combobox(ctrl1, textvariable=self._lang_var, values=LANG_LABELS,
-                     state="readonly", width=22).pack(side="left", padx=(4, 16))
+                     state="readonly", width=22, style="Warm.TCombobox").pack(side="left", padx=(4, 16))
 
         self._translate_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
             ctrl1, text="Translate to English", variable=self._translate_var,
             fg=TEXT, bg=BG, selectcolor=SURFACE, activebackground=BG,
             activeforeground=TEXT, font=("SF Pro Text", 12),
+            highlightthickness=0, bd=0,
         ).pack(side="left")
 
         # ── controls row 2: output folder ───────────────────────────────────
         ctrl2 = tk.Frame(self, bg=BG)
-        ctrl2.pack(fill="x", padx=16, pady=(6, 4))
+        ctrl2.pack(fill="x", padx=16, pady=(10, 4))
 
         tk.Label(ctrl2, text="Output:", fg=SUBTEXT, bg=BG,
                  font=("SF Pro Text", 12)).pack(side="left")
         self._output_var = tk.StringVar(value=str(DEFAULT_OUTPUT))
-        tk.Entry(ctrl2, textvariable=self._output_var, width=32,
+        tk.Entry(ctrl2, textvariable=self._output_var, width=30,
                  bg=SURFACE, fg=TEXT, insertbackground=TEXT,
-                 relief="flat", font=("SF Mono", 11)).pack(side="left", padx=(4, 6))
-        tk.Button(ctrl2, text="…", command=self._pick_output,
-                  bg=SURFACE, fg=TEXT, relief="flat",
-                  font=("SF Pro Text", 12), padx=6).pack(side="left", padx=(0, 6))
-        tk.Button(ctrl2, text="Open output folder", command=self._open_output,
-                  bg=SURFACE, fg=TEXT, relief="flat",
-                  font=("SF Pro Text", 11), padx=8).pack(side="left")
+                 relief="flat", font=("SF Mono", 11),
+                 highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=ACCENT).pack(side="left", padx=(4, 8), ipady=4)
+        RoundedButton(ctrl2, "…", command=self._pick_output, bg=SURFACE, fg=TEXT,
+                      hover_bg=BORDER, width=34, height=30, radius=8,
+                      font=("SF Pro Text", 12)).pack(side="left", padx=(0, 6))
+        RoundedButton(ctrl2, "Open output folder", command=self._open_output,
+                      bg=SURFACE, fg=TEXT, hover_bg=BORDER, radius=8,
+                      font=("SF Pro Text", 11), padx=14, height=30).pack(side="left")
 
         # ── controls row 3: characters per line ─────────────────────────────
         ctrl3 = tk.Frame(self, bg=BG)
-        ctrl3.pack(fill="x", padx=16, pady=(2, 4))
+        ctrl3.pack(fill="x", padx=16, pady=(10, 4))
 
         tk.Label(ctrl3, text="Characters per line:", fg=SUBTEXT, bg=BG,
                  font=("SF Pro Text", 12)).pack(side="left")
 
         self._max_chars_var = tk.IntVar(value=transcribe.DEFAULT_MAX_CHARS)
-
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure("Warm.Horizontal.TScale", background=BG, troughcolor=SURFACE)
 
         self._max_chars_scale = ttk.Scale(
             ctrl3, from_=transcribe.MIN_MAX_CHARS, to=transcribe.MAX_MAX_CHARS,
@@ -163,26 +317,23 @@ class WhisperDropApp(TkinterDnD.Tk):
             command=self._on_scale_change,
         )
         self._max_chars_scale.set(transcribe.DEFAULT_MAX_CHARS)
-        self._max_chars_scale.pack(side="left", padx=(6, 8))
+        self._max_chars_scale.pack(side="left", padx=(8, 10))
 
         self._max_chars_entry = tk.Entry(
             ctrl3, textvariable=self._max_chars_var, width=4,
             bg=SURFACE, fg=TEXT, insertbackground=TEXT,
             relief="flat", font=("SF Mono", 11), justify="center",
+            highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT,
         )
-        self._max_chars_entry.pack(side="left")
+        self._max_chars_entry.pack(side="left", ipady=3)
         self._max_chars_entry.bind("<Return>", self._on_entry_change)
         self._max_chars_entry.bind("<FocusOut>", self._on_entry_change)
 
         # ── overall progress ─────────────────────────────────────────────────
         self._eta_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self._eta_var, fg=ACCENT, bg=BG,
-                 font=("SF Pro Text", 12)).pack(anchor="w", padx=16, pady=(8, 2))
+                 font=("SF Pro Text", 12)).pack(anchor="w", padx=16, pady=(10, 2))
 
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure("Overall.Horizontal.TProgressbar", troughcolor=SURFACE,
-                        background=ACCENT, bordercolor=SURFACE, lightcolor=ACCENT, darkcolor=ACCENT)
         self._overall_bar = ttk.Progressbar(
             self, style="Overall.Horizontal.TProgressbar",
             orient="horizontal", mode="determinate", maximum=100,
@@ -194,8 +345,6 @@ class WhisperDropApp(TkinterDnD.Tk):
         tk.Label(self, textvariable=self._file_progress_var, fg=SUBTEXT, bg=BG,
                  font=("SF Pro Text", 11)).pack(anchor="w", padx=16)
 
-        style.configure("File.Horizontal.TProgressbar", troughcolor=SURFACE,
-                        background=GREEN, bordercolor=SURFACE, lightcolor=GREEN, darkcolor=GREEN)
         self._file_bar = ttk.Progressbar(
             self, style="File.Horizontal.TProgressbar",
             orient="horizontal", mode="determinate", maximum=100,
@@ -208,8 +357,9 @@ class WhisperDropApp(TkinterDnD.Tk):
 
         self._listbox = tk.Listbox(
             list_frame, bg=SURFACE, fg=TEXT, selectbackground=ACCENT,
-            font=("SF Mono", 11), relief="flat", bd=0,
+            selectforeground="white", font=("SF Mono", 11), relief="flat", bd=0,
             activestyle="none", height=7,
+            highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT,
         )
         scrollbar = tk.Scrollbar(list_frame, orient="vertical",
                                   command=self._listbox.yview)
@@ -223,18 +373,18 @@ class WhisperDropApp(TkinterDnD.Tk):
         for label, cmd in (
             ("↑", self._move_up), ("↓", self._move_down), ("✕", self._remove_selected),
         ):
-            tk.Button(order_frame, text=label, command=cmd,
-                      bg=SURFACE, fg=TEXT, relief="flat",
-                      font=("SF Pro Text", 12), width=2).pack(pady=2)
+            RoundedButton(order_frame, label, command=cmd, bg=SURFACE, fg=TEXT,
+                          hover_bg=BORDER, width=32, height=30, radius=8,
+                          font=("SF Pro Text", 12)).pack(pady=3)
 
         # ── log ──────────────────────────────────────────────────────────────
         log_frame = tk.Frame(self, bg=BG)
-        log_frame.pack(fill="both", expand=True, padx=16, pady=(6, 6))
+        log_frame.pack(fill="both", expand=True, padx=16, pady=(10, 6))
 
         self._log = tk.Text(
             log_frame, bg=SURFACE, fg=TEXT, font=("SF Mono", 10),
             relief="flat", bd=0, state="disabled", height=6,
-            wrap="word",
+            wrap="word", highlightthickness=1, highlightbackground=BORDER,
         )
         log_scroll = tk.Scrollbar(log_frame, orient="vertical", command=self._log.yview)
         self._log.configure(yscrollcommand=log_scroll.set)
@@ -243,27 +393,21 @@ class WhisperDropApp(TkinterDnD.Tk):
 
         # ── run / cancel button ──────────────────────────────────────────────
         btn_frame = tk.Frame(self, bg=BG)
-        btn_frame.pack(pady=(0, 14))
-        self._run_btn = tk.Button(
-            btn_frame, text="Run", command=self._toggle_run,
-            bg=ACCENT, fg="white", font=("SF Pro Text", 14, "bold"),
-            relief="flat", padx=32, pady=8, cursor="hand2",
+        btn_frame.pack(pady=(4, 16))
+        self._run_btn = RoundedButton(
+            btn_frame, "Run", command=self._toggle_run,
+            bg=ACCENT, hover_bg=ACCENT_HOVER, fg="white",
+            font=("SF Pro Text", 14, "bold"), radius=12, padx=36, pady=10,
         )
         self._run_btn.pack()
         bottom_row = tk.Frame(btn_frame, bg=BG)
-        bottom_row.pack(pady=(6, 0))
-        self._clear_btn = tk.Button(
-            bottom_row, text="Clear queue", command=self._clear_queue,
-            bg=SURFACE, fg=SUBTEXT, font=("SF Pro Text", 11),
-            relief="flat", padx=12, pady=4, cursor="hand2",
-        )
-        self._clear_btn.pack(side="left", padx=4)
-        self._retry_btn = tk.Button(
-            bottom_row, text="Retry failed", command=self._retry_failed,
-            bg=SURFACE, fg=SUBTEXT, font=("SF Pro Text", 11),
-            relief="flat", padx=12, pady=4, cursor="hand2",
-        )
-        self._retry_btn.pack(side="left", padx=4)
+        bottom_row.pack(pady=(8, 0))
+        RoundedButton(bottom_row, "Clear queue", command=self._clear_queue,
+                      bg=SURFACE, fg=SUBTEXT, hover_bg=BORDER, radius=8,
+                      font=("SF Pro Text", 11), padx=14, height=28).pack(side="left", padx=4)
+        RoundedButton(bottom_row, "Retry failed", command=self._retry_failed,
+                      bg=SURFACE, fg=SUBTEXT, hover_bg=BORDER, radius=8,
+                      font=("SF Pro Text", 11), padx=14, height=28).pack(side="left", padx=4)
 
     # ── event handlers ───────────────────────────────────────────────────────
     def _on_drop(self, event):
@@ -281,12 +425,10 @@ class WhisperDropApp(TkinterDnD.Tk):
                 self._job_queue.put(f)
 
     def _on_drag_enter(self, event):
-        self._drop_frame.configure(highlightbackground=ACCENT)
-        self._drop_label.configure(text="Release to add files", fg=ACCENT)
+        self._drop_zone.set_hover(True)
 
     def _on_drag_leave(self, event):
-        self._drop_frame.configure(highlightbackground=BORDER)
-        self._drop_label.configure(text="Drop media files or a folder here", fg=SUBTEXT)
+        self._drop_zone.set_hover(False)
 
     def _on_scale_change(self, value):
         self._max_chars_var.set(round(float(value)))
@@ -366,7 +508,8 @@ class WhisperDropApp(TkinterDnD.Tk):
     def _toggle_run(self):
         if self._running:
             self._stop_flag = True
-            self._run_btn.config(text="Stopping…", state="disabled")
+            self._run_btn.set_text("Stopping…")
+            self._run_btn.set_enabled(False)
         else:
             if not self._queued_files:
                 self._log_append("No files queued. Drop some files first.\n")
@@ -380,7 +523,8 @@ class WhisperDropApp(TkinterDnD.Tk):
         self._durations.clear()
         self._failed_files = []
         self._reset_progress_bars()
-        self._run_btn.config(text="Cancel", bg=RED)
+        self._run_btn.set_text("Cancel")
+        self._run_btn.set_bg(RED, RED_HOVER)
 
         self._on_entry_change(None)  # normalize/clamp any typed value before using it
 
@@ -486,7 +630,9 @@ class WhisperDropApp(TkinterDnD.Tk):
             self._file_progress_var.set("")
             self._running = False
             self._stop_flag = False
-            self._run_btn.config(text="Run", bg=ACCENT, state="normal")
+            self._run_btn.set_text("Run")
+            self._run_btn.set_bg(ACCENT, ACCENT_HOVER)
+            self._run_btn.set_enabled(True)
 
     def _update_list_item(self, idx: int, status: str, name: str):
         if idx < 0:
