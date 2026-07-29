@@ -95,6 +95,37 @@ def _flatten_words(segments) -> list[dict]:
     return words
 
 
+# CJK ranges where words/characters run together with no space: Chinese
+# (incl. Cantonese) ideographs, Japanese kana, Hangul, and CJK punctuation.
+_CJK_RANGES = (
+    (0x4E00, 0x9FFF), (0x3400, 0x4DBF),   # CJK Unified Ideographs (+ Ext A)
+    (0x3040, 0x30FF),                      # Hiragana, Katakana
+    (0xAC00, 0xD7A3),                      # Hangul syllables
+    (0x3000, 0x303F), (0xFF00, 0xFFEF),   # CJK/fullwidth punctuation
+)
+
+
+def _is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
+
+
+def _smart_join(parts: list[str]) -> str:
+    """Join word fragments, omitting the space around any CJK boundary
+    (Chinese/Cantonese/Japanese/Korean don't separate words with spaces)
+    while keeping spaces between Latin-script words."""
+    text = ""
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if not text or _is_cjk(text[-1]) or _is_cjk(p[0]):
+            text += p
+        else:
+            text += " " + p
+    return text
+
+
 def words_to_blocks(
     words: list[dict],
     max_chars: int = DEFAULT_MAX_CHARS,
@@ -112,21 +143,21 @@ def words_to_blocks(
         if cur_start is None:
             cur_start = w["start"]
 
-        candidate = " ".join([x["word"].strip() for x in cur_words] + [text])
+        candidate = _smart_join([x["word"] for x in cur_words] + [text])
         too_long = len(candidate) > max_chars
         too_slow = (w["end"] - cur_start) > max_duration
         ends_sentence = cur_words and cur_words[-1]["word"].strip()[-1:] in ".!?。！？"
 
         if cur_words and (too_long or too_slow or ends_sentence):
             blocks.append((cur_start, cur_words[-1]["end"],
-                            " ".join(x["word"].strip() for x in cur_words)))
+                            _smart_join([x["word"] for x in cur_words])))
             cur_words, cur_start = [], w["start"]
 
         cur_words.append(w)
 
     if cur_words:
         blocks.append((cur_start, cur_words[-1]["end"],
-                        " ".join(x["word"].strip() for x in cur_words)))
+                        _smart_join([x["word"] for x in cur_words])))
     return blocks
 
 
