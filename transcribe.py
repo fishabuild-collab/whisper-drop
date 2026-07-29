@@ -223,6 +223,16 @@ def transcribe_file(
     return result
 
 
+def _write_srt_and_txt(result: dict, max_chars: int, srt_path: Path, txt_path: Path):
+    words = _flatten_words(result["segments"])
+    if words:
+        content = blocks_to_srt(words_to_blocks(words, max_chars=max_chars))
+    else:
+        content = segments_to_srt(result["segments"])
+    srt_path.write_text(content, encoding="utf-8")
+    txt_path.write_text(content, encoding="utf-8")
+
+
 def run_batch(
     model,
     files: list[Path],
@@ -232,9 +242,14 @@ def run_batch(
     stop_flag,
     task: str = "transcribe",
     max_chars: int = DEFAULT_MAX_CHARS,
+    also_english: bool = False,
 ):
     """
     Transcribe a list of files.
+    If also_english is True and language isn't already English, a second
+    English SRT/TXT pair is written alongside the primary one, suffixed
+    "<name>.en.srt" / "<name>.en.txt".
+
     progress_callback(event, data) receives:
       ("skip",     {"index": i, "total": n, "file": Path})
       ("start",    {"index": i, "total": n, "file": Path})
@@ -252,8 +267,12 @@ def run_batch(
             break
 
         srt_path = output_folder / (media_path.stem + ".srt")
+        txt_path = output_folder / (media_path.stem + ".txt")
+        needs_english = also_english and language != "en"
+        en_srt_path = output_folder / (media_path.stem + ".en.srt")
+        en_txt_path = output_folder / (media_path.stem + ".en.txt")
 
-        if srt_path.exists():
+        if srt_path.exists() and (not needs_english or en_srt_path.exists()):
             skipped += 1
             progress_callback("skip", {"index": i, "total": total, "file": media_path})
             continue
@@ -261,20 +280,21 @@ def run_batch(
         progress_callback("start", {"index": i, "total": total, "file": media_path})
         t0 = time.time()
         try:
-            def on_fraction(frac, _i=i, _f=media_path):
-                progress_callback("progress", {"index": _i, "total": total, "file": _f, "fraction": frac})
+            primary_scale = 0.5 if needs_english else 1.0
+
+            def on_fraction(frac, _i=i, _f=media_path, _scale=primary_scale):
+                progress_callback("progress", {"index": _i, "total": total, "file": _f, "fraction": frac * _scale})
 
             result = transcribe_file(model, media_path, language, task, on_fraction)
-            words = _flatten_words(result["segments"])
-            if words:
-                blocks = words_to_blocks(words, max_chars=max_chars)
-                srt_content = blocks_to_srt(blocks)
-            else:
-                srt_content = segments_to_srt(result["segments"])
-            srt_path.write_text(srt_content, encoding="utf-8")
-            # Also write a .txt copy with the same SRT-formatted content.
-            txt_path = output_folder / (media_path.stem + ".txt")
-            txt_path.write_text(srt_content, encoding="utf-8")
+            _write_srt_and_txt(result, max_chars, srt_path, txt_path)
+
+            if needs_english:
+                def on_fraction_en(frac, _i=i, _f=media_path):
+                    progress_callback("progress", {"index": _i, "total": total, "file": _f, "fraction": 0.5 + frac * 0.5})
+
+                en_result = transcribe_file(model, media_path, language, "translate", on_fraction_en)
+                _write_srt_and_txt(en_result, max_chars, en_srt_path, en_txt_path)
+
             elapsed = time.time() - t0
             succeeded += 1
             progress_callback("done", {"index": i, "total": total, "file": media_path, "elapsed": elapsed})

@@ -279,9 +279,9 @@ class WhisperDropApp(TkinterDnD.Tk):
         ttk.Combobox(ctrl1, textvariable=self._lang_var, values=LANG_LABELS,
                      state="readonly", width=22, style="Warm.TCombobox").pack(side="left", padx=(4, 16))
 
-        self._translate_var = tk.BooleanVar(value=False)
+        self._also_english_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            ctrl1, text="Translate to English", variable=self._translate_var,
+            ctrl1, text="Also generate English SRT", variable=self._also_english_var,
             fg=TEXT, bg=BG, selectcolor=SURFACE, activebackground=BG,
             activeforeground=TEXT, font=("SF Pro Text", 12),
             highlightthickness=0, bd=0,
@@ -535,17 +535,17 @@ class WhisperDropApp(TkinterDnD.Tk):
         model_name = self._model_var.get()
         output_folder = Path(self._output_var.get())
         lang_code = LANG_CODES[LANG_LABELS.index(self._lang_var.get())]
-        task = "translate" if self._translate_var.get() else "transcribe"
         max_chars = self._max_chars_var.get()
+        also_english = self._also_english_var.get()
 
         thread = threading.Thread(
             target=self._worker,
-            args=(model_name, output_folder, list(self._queued_files), lang_code, task, max_chars),
+            args=(model_name, output_folder, list(self._queued_files), lang_code, max_chars, also_english),
             daemon=True,
         )
         thread.start()
 
-    def _worker(self, model_name, output_folder, files, lang_code, task, max_chars):
+    def _worker(self, model_name, output_folder, files, lang_code, max_chars, also_english):
         self._ui_put(("log", f"Loading model '{model_name}'…\n"))
 
         if self._loaded_model_name != model_name:
@@ -561,8 +561,8 @@ class WhisperDropApp(TkinterDnD.Tk):
             language=lang_code,
             progress_callback=self._on_progress,
             stop_flag=lambda: self._stop_flag,
-            task=task,
             max_chars=max_chars,
+            also_english=also_english,
         )
 
     def _on_progress(self, event: str, data: dict):
